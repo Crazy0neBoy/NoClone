@@ -20,9 +20,10 @@ pip install -r requirements.txt
 1. Заполните файл `input.txt` строками для проверки.
 2. Запустите скрипт:
    ```bash
-   python main.py
+   python main.py [--db DB_PATH] [--output OUTPUT_PATH] [--input INPUT_PATH]
    ```
-   или на Windows можно использовать `Start_NoClone.bat`.
+   Параметры необязательны. По умолчанию используются файлы `IdsBD.txt`,
+   `GoodId.txt` и `input.txt`. На Windows можно использовать `Start_NoClone.bat`.
 3. Результаты:
    - `IdsBD.txt` – накопительная база уникальных строк;
    - `GoodId.txt` – новые уникальные строки текущего запуска;

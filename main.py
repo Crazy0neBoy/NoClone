@@ -1,18 +1,20 @@
+import argparse
 from pathlib import Path
-from tqdm import tqdm
 from typing import Set
 
-# Конфигурация
-AD_DATABASE = Path("IdsBD.txt")
-GOOD_ID_FILE = Path("GoodId.txt")
-INPUT_FILE = Path("input.txt")
+from tqdm import tqdm
+
+# Конфигурация по умолчанию
+DEFAULT_DB = Path("IdsBD.txt")
+DEFAULT_OUTPUT = Path("GoodId.txt")
+DEFAULT_INPUT = Path("input.txt")
 
 
 def create_file_if_not_exists(path: Path) -> None:
     path.touch(exist_ok=True)
 
 
-def load_database(path: Path = AD_DATABASE) -> Set[str]:
+def load_database(path: Path) -> Set[str]:
     if not path.exists():
         return set()
     return set(path.read_text(encoding="utf-8").splitlines())
@@ -24,7 +26,7 @@ def save_words(words: list[str], path: Path) -> None:
             f.write("\n".join(words) + "\n")
 
 
-def read_input_file(path: Path = INPUT_FILE) -> list[str]:
+def read_input_file(path: Path) -> list[str]:
     if not path.exists():
         return []
     lines = path.read_text(encoding="utf-8").splitlines()
@@ -32,7 +34,12 @@ def read_input_file(path: Path = INPUT_FILE) -> list[str]:
     return lines
 
 
-def process_words(input_words: list[str], db: Set[str]) -> tuple[int, int, int, int]:
+def process_words(
+    input_words: list[str],
+    db: Set[str],
+    db_path: Path,
+    good_id_path: Path,
+) -> tuple[int, int, int, int]:
     unique, duplicate, skipped = [], 0, 0
 
     for word in tqdm(input_words, desc="Обработка строк", unit="стр"):
@@ -47,21 +54,50 @@ def process_words(input_words: list[str], db: Set[str]) -> tuple[int, int, int, 
             unique.append(word)
 
     # сохраняем только новые строки
-    save_words(unique, AD_DATABASE)
-    save_words(unique, GOOD_ID_FILE)
+    save_words(unique, db_path)
+    save_words(unique, good_id_path)
 
     return len(unique), duplicate, skipped, len(db)
 
 
-def main():
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Удаление повторяющихся строк из текстового файла"
+    )
+    parser.add_argument(
+        "--db",
+        type=Path,
+        default=DEFAULT_DB,
+        help="Путь к файлу базы уникальных строк",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        default=DEFAULT_OUTPUT,
+        help="Путь к файлу для новых уникальных строк",
+    )
+    parser.add_argument(
+        "--input",
+        type=Path,
+        default=DEFAULT_INPUT,
+        help="Путь к входному файлу",
+    )
+    return parser.parse_args()
+
+
+def main() -> None:
+    args = parse_args()
+
     # Подготовка файлов
-    for file in (AD_DATABASE, GOOD_ID_FILE, INPUT_FILE):
+    for file in (args.db, args.output, args.input):
         create_file_if_not_exists(file)
 
-    db = load_database()
-    inputs = read_input_file()
+    db = load_database(args.db)
+    inputs = read_input_file(args.input)
 
-    unique_count, duplicate_count, skipped_count, total_in_db = process_words(inputs, db)
+    unique_count, duplicate_count, skipped_count, total_in_db = process_words(
+        inputs, db, args.db, args.output
+    )
 
     processed_count = len(inputs) - skipped_count
 
