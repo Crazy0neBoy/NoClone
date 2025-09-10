@@ -1,4 +1,3 @@
-# ---===== АнтиДубликат =====---
 from pathlib import Path
 from tqdm import tqdm
 from typing import Set
@@ -77,4 +76,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-# ---===== АнтиДубликат =====---
