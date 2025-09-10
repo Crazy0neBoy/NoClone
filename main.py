@@ -33,10 +33,14 @@ def read_input_file(path: Path = INPUT_FILE) -> list[str]:
     return lines
 
 
-def process_words(input_words: list[str], db: Set[str]) -> tuple[int, int, int]:
-    unique, duplicate = [], 0
+def process_words(input_words: list[str], db: Set[str]) -> tuple[int, int, int, int]:
+    unique, duplicate, skipped = [], 0, 0
 
     for word in tqdm(input_words, desc="Обработка строк", unit="стр"):
+        word = word.strip()
+        if not word:
+            skipped += 1
+            continue
         if word in db:
             duplicate += 1
         else:
@@ -47,7 +51,7 @@ def process_words(input_words: list[str], db: Set[str]) -> tuple[int, int, int]:
     save_words(unique, AD_DATABASE)
     save_words(unique, GOOD_ID_FILE)
 
-    return len(unique), duplicate, len(db)
+    return len(unique), duplicate, skipped, len(db)
 
 
 def main():
@@ -58,13 +62,17 @@ def main():
     db = load_database()
     inputs = read_input_file()
 
-    unique_count, duplicate_count, total_in_db = process_words(inputs, db)
+    unique_count, duplicate_count, skipped_count, total_in_db = process_words(inputs, db)
+
+    processed_count = len(inputs) - skipped_count
 
     print("\n--- Статистика ---")
-    print(f"Всего строк обработано: {len(inputs)}")
+    print(f"Всего строк прочитано:  {len(inputs)}")
+    print(f"Пропущено пустых:       {skipped_count}")
+    print(f"Всего строк обработано: {processed_count}")
     print(f"Уникальных добавлено:   {unique_count}")
-    print(f"Повторов найдено:      {duplicate_count}")
-    print(f"Всего строк в базе:    {total_in_db}")
+    print(f"Повторов найдено:       {duplicate_count}")
+    print(f"Всего строк в базе:     {total_in_db}")
 
 
 if __name__ == "__main__":
