@@ -1,12 +1,4 @@
-# Byte-compiled / optimized / DLL files
-__pycache__/
-*.py[cod]
-*.pyo
-
-# Virtual environments
-.venv/
-venv/
-.idea/
+.idea
 
 # Output data files
 IdsBD.txt
