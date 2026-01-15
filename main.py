@@ -1,156 +1,247 @@
 import argparse
+import sqlite3
+import logging
+from datetime import datetime
 from pathlib import Path
+from typing import Generator, Iterable, List
 
 from tqdm import tqdm
 
-# Конфигурация по умолчанию
-DEFAULT_DB = Path("IdsBD.txt")
-DEFAULT_OUTPUT = Path("GoodId.txt")
+# Настройки
+DEFAULT_DB = Path("IdsBD.db")
+DEFAULT_TXT_DB = Path("IdsBD.txt")  # Для миграции
 DEFAULT_INPUT = Path("input.txt")
+BATCH_SIZE = 1000  # Размер пачки для SQLite
 
+def setup_logging() -> None:
+    """Настройка логирования в папку logs."""
+    log_dir = Path("logs")
+    log_dir.mkdir(exist_ok=True)
+    
+    # Имя лог-файла с датой
+    log_filename = log_dir / f"log_{{datetime.now().strftime('%Y-%m-%d')}}.txt"
+    
+    logging.basicConfig(
+        level=logging.INFO,
+        format="[%(asctime)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[
+            logging.FileHandler(log_filename, encoding="utf-8"),
+            logging.StreamHandler()  # Вывод в консоль тоже
+        ]
+    )
+
+def generate_output_filename() -> Path:
+    """Генерация имени выходного файла с текущим временем."""
+    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+    return Path(f"GoodId_{{timestamp}}.txt")
 
 def create_file_if_not_exists(path: Path) -> None:
-    """Создать пустой файл, если его ещё нет."""
-    path.touch(exist_ok=True)
-
-
-def load_database(path: Path) -> set[str]:
-    """Загрузить базу уникальных строк в множество, очистив пустые и пробелы."""
     if not path.exists():
-        return set()
+        path.touch()
 
-    lines = path.read_text(encoding="utf-8").splitlines()
-    return {line.strip() for line in lines if line.strip()}
+def init_db(db_path: Path) -> None:
+    """Инициализация базы данных SQLite."""
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS unique_items (
+                content TEXT PRIMARY KEY
+            )
+            """
+        )
 
-
-def save_words(words: list[str], path: Path) -> None:
-    """Сохранить список строк в конец файла, одной пачкой."""
-    if not words:
+def migrate_from_txt_if_needed(txt_path: Path, db_path: Path) -> None:
+    if not txt_path.exists():
         return
 
+    logging.info(f"Обнаружена старая база {txt_path}. Начинаем миграцию...")
+    
+    try:
+        lines = txt_path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError:
+        lines = txt_path.read_text(encoding="cp1251").splitlines()
+    
+    unique_items = {line.strip() for line in lines if line.strip()}
+    
+    if unique_items:
+        with sqlite3.connect(db_path) as conn:
+            cursor = conn.cursor()
+            cursor.executemany(
+                "INSERT OR IGNORE INTO unique_items (content) VALUES (?)",
+                [(item,) for item in unique_items]
+            )
+            conn.commit()
+            logging.info(f"Мигрировано записей: {len(unique_items)}")
+
+    bak_path = txt_path.with_suffix(".txt.bak")
+    txt_path.rename(bak_path)
+    logging.info(f"Старый файл переименован в {bak_path}")
+
+def save_words(words: List[str], path: Path) -> None:
+    if not words:
+        return
+    # Если файла нет, создаем. Если есть - дописываем (хотя у нас теперь уникальные имена файлов)
     with path.open("a", encoding="utf-8") as f:
         f.write("\n".join(words) + "\n")
 
+def read_input_file(path: Path) -> List[str]:
+    try:
+        content = path.read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        content = path.read_text(encoding="cp1251")
+    return content.splitlines()
 
-def save_db_atomic(db: set[str], path: Path) -> None:
-    """
-    Атомарно сохранить содержимое базы в файл.
+def get_db_count(db_path: Path) -> int:
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.execute("SELECT Count(*) FROM unique_items")
+        return cursor.fetchone()[0]
 
-    Пишем всё множество в временный файл, затем заменяем основной.
-    """
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
-    # Чтобы база была хоть как-то упорядочена — отсортируем
-    content = "\n".join(sorted(db))
-    tmp_path.write_text(content + ("\n" if content else ""), encoding="utf-8")
-    tmp_path.replace(path)
+def chunked_iterable(iterable: Iterable, size: int) -> Generator[List, None, None]:
+    """Разбивает список на пачки (чанки)."""
+    chunk = []
+    for item in iterable:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
 
-
-def read_input_file(path: Path) -> list[str]:
-    """Прочитать входной файл и очистить его после успешного чтения."""
-    lines = path.read_text(encoding="utf-8").splitlines()
-    # Очистка будет безопасной, так как к этому моменту данные уже в памяти
-    path.write_text("", encoding="utf-8")  # очистка
-    return lines
-
-
-def process_words(
-    input_words: list[str],
-    db: set[str],
+def process_words_batch(
+    input_words: List[str],
     db_path: Path,
     good_id_path: Path,
     show_progress: bool = True,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int]:
     """
-    Обработать входные строки.
-
-    Возвращает кортеж:
-    (кол-во уникальных, повторов, пустых, итоговое количество в базе)
+    Обработка строк пачками (Batch Processing).
     """
-    unique: list[str] = []
-    duplicate = 0
-    skipped = 0
+    unique_buffer: List[str] = []
+    duplicate_count = 0
+    skipped_count = 0
+    added_count = 0
 
-    iterator = tqdm(input_words, desc="Обработка строк", unit="стр", disable=not show_progress)
+    # Фильтруем пустые строки сразу
+    clean_words = [w.strip() for w in input_words if w.strip()]
+    skipped_count = len(input_words) - len(clean_words)
 
-    for word in iterator:
-        word = word.strip()
-        if not word:
-            skipped += 1
-            continue
+    with sqlite3.connect(db_path) as conn:
+        cursor = conn.cursor()
+        
+        # tqdm теперь идет по чанкам, но total указываем в строках для красоты
+        iterator = tqdm(
+            chunked_iterable(clean_words, BATCH_SIZE),
+            total=(len(clean_words) + BATCH_SIZE - 1) // BATCH_SIZE,
+            desc="Обработка (пачками)",
+            unit="пачек",
+            disable=not show_progress
+        )
 
-        if word in db:
-            duplicate += 1
-        else:
-            db.add(word)
-            unique.append(word)
+        for batch in iterator:
+            # 1. Убираем дубликаты внутри самой пачки (чтобы не проверять "a", "a" дважды)
+            # Но нужно аккуратно считать статистику дублей
+            batch_set = set(batch)
+            local_dups = len(batch) - len(batch_set)
+            duplicate_count += local_dups
+            
+            if not batch_set:
+                continue
 
-    # Базу сохраняем атомарно (всё множество целиком)
-    save_db_atomic(db, db_path)
-    # В выходной файл пишем только новые уникальные значения (как раньше)
-    save_words(unique, good_id_path)
+            # 2. Проверяем, какие из этих слов УЖЕ есть в базе
+            # Генерируем плейсхолдеры (?, ?, ?)
+            placeholders = ",".join("?" * len(batch_set))
+            query = f"SELECT content FROM unique_items WHERE content IN ({placeholders})"
+            
+            cursor.execute(query, list(batch_set))
+            existing_in_db = {row[0] for row in cursor.fetchall()}
+            
+            # 3. Вычисляем новые слова
+            new_words = [w for w in batch_set if w not in existing_in_db]
+            
+            # Статистика: те, что нашлись в базе - дубликаты
+            duplicate_count += len(existing_in_db)
 
-    return len(unique), duplicate, skipped, len(db)
+            # 4. Вставляем новые
+            if new_words:
+                cursor.executemany(
+                    "INSERT INTO unique_items (content) VALUES (?)",
+                    [(w,) for w in new_words]
+                )
+                unique_buffer.extend(new_words)
+                added_count += len(new_words)
+        
+        conn.commit()
 
+    # Сохраняем результат
+    if unique_buffer:
+        save_words(unique_buffer, good_id_path)
+
+    return added_count, duplicate_count, skipped_count
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="Удаление повторяющихся строк из файла с ведением базы уникальных значений"
-    )
-    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Путь к файлу базы уникальных значений")
-    parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Файл для записи новых уникальных строк")
-    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Входной файл со строками")
-    parser.add_argument(
-        "--no-progress",
-        action="store_true",
-        help="Отключить прогресс-бар tqdm (удобно для автоматизации и логов)",
-    )
+    parser = argparse.ArgumentParser(description="NoClone: Удаление дублей с БД SQLite")
+    parser.add_argument("--db", type=Path, default=DEFAULT_DB, help="Файл базы данных")
+    # Если output не передан, он будет None, и мы сгенерируем имя позже
+    parser.add_argument("--output", type=Path, default=None, help="Файл результата (по умолчанию GoodId_DATA_TIME.txt)")
+    parser.add_argument("--input", type=Path, default=DEFAULT_INPUT, help="Входной файл")
+    parser.add_argument("--no-progress", action="store_true", help="Скрыть прогресс-бар")
     return parser.parse_args()
 
-
 def main() -> None:
+    setup_logging()
     args = parse_args()
 
-    # Создаём только файлы базы и вывода
-    create_file_if_not_exists(args.db)
-    create_file_if_not_exists(args.output)
+    # Определяем имя выходного файла
+    output_path = args.output if args.output else generate_output_filename()
 
-    # Логика создания input.txt
+    logging.info(f"Запуск NoClone. Вход: {args.input}, База: {args.db}")
+    
+    init_db(args.db)
+    if DEFAULT_TXT_DB.exists():
+        migrate_from_txt_if_needed(DEFAULT_TXT_DB, args.db)
+
     if not args.input.exists():
         create_file_if_not_exists(args.input)
-        print(f"Создан файл: {args.input}")
-        print("Внесите в него строки для поиска уникальных и запустите программу снова.")
+        logging.warning(f"Файл {args.input} не найден. Создан пустой файл.")
+        print(f"Создан файл: {args.input}. Внесите данные и перезапустите.")
         return
 
-    # Проверка на пустой файл
-    raw_text = args.input.read_text(encoding="utf-8")
-    if not raw_text.strip():
-        print(f"Файл {args.input} пуст.")
-        print("Добавьте строки для поиска уникальных значений и запустите снова.")
+    try:
+        inputs = read_input_file(args.input)
+    except Exception as e:
+        logging.error(f"Ошибка чтения {args.input}: {e}")
         return
 
-    # Если файл существовал и не пуст
-    inputs = read_input_file(args.input)
+    if not inputs and args.input.stat().st_size == 0:
+        logging.warning("Входной файл пуст.")
+        print("Входной файл пуст.")
+        return
 
-    db = load_database(args.db)
-
-    unique_count, duplicate_count, skipped_count, total_in_db = process_words(
+    # Обработка
+    unique, dups, skipped = process_words_batch(
         inputs,
-        db,
         args.db,
-        args.output,
+        output_path,
         show_progress=not args.no_progress,
     )
 
-    processed_count = len(inputs) - skipped_count
+    # Очистка
+    args.input.write_text("", encoding="utf-8")
 
-    print("\n--- Статистика ---")
-    print(f"Всего строк прочитано:  {len(inputs)}")
-    print(f"Пропущено пустых:       {skipped_count}")
-    print(f"Всего строк обработано: {processed_count}")
-    print(f"Уникальных добавлено:   {unique_count}")
-    print(f"Повторов найдено:       {duplicate_count}")
-    print(f"Всего строк в базе:     {total_in_db}")
-
+    total_db = get_db_count(args.db)
+    
+    # Итоговый отчет в консоль и лог
+    stats = (
+        f"\n--- Результат ---\n"
+        f"Файл результата:    {output_path}\n"
+        f"Обработано строк:   {len(inputs) - skipped}\n"
+        f"Уникальных (новых): {unique}\n"
+        f"Повторов (старых):  {dups}\n"
+        f"Всего в базе:       {total_db}"
+    )
+    print(stats)
+    logging.info(stats.replace("\n", " | "))
 
 if __name__ == "__main__":
     main()
